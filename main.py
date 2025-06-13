@@ -3,6 +3,7 @@ import requests
 import json
 from datetime import datetime
 import sys
+import time
 
 # Библиотеки Google
 from google.oauth2.service_account import Credentials
@@ -11,7 +12,7 @@ from googleapiclient.http import MediaFileUpload
 
 # --- КОНФИГУРАЦИЯ ---
 ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
-ELEVENLABS_AGENT_ID = os.getenv('ELEVENLABS_AGENT_ID') # ID вашего агента
+ELEVENLABS_AGENT_ID = os.getenv('ELEVENLABS_AGENT_ID')
 GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID')
 GOOGLE_DRIVE_FOLDER_ID = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
 GOOGLE_CREDENTIALS_JSON_STR = os.getenv('GOOGLE_CREDENTIALS_JSON')
@@ -20,7 +21,6 @@ PROCESSED_IDS_FILE = 'processed_ids.txt'
 API_BASE_URL = "https://api.elevenlabs.io/v1"
 
 def get_google_services():
-    """Аутентификация в Google и получение сервисов Docs и Drive."""
     try:
         creds_json = json.loads(GOOGLE_CREDENTIALS_JSON_STR)
         creds = Credentials.from_service_account_info(
@@ -33,19 +33,16 @@ def get_google_services():
         return None, None
 
 def get_processed_ids():
-    """Загружает ID обработанных записей из файла."""
     if not os.path.exists(PROCESSED_IDS_FILE):
         return set()
     with open(PROCESSED_IDS_FILE, 'r') as f:
         return set(line.strip() for line in f)
 
 def save_processed_id(conversation_id):
-    """Сохраняет ID обработанной записи в файл."""
     with open(PROCESSED_IDS_FILE, 'a') as f:
         f.write(conversation_id + '\n')
 
 def get_new_conversations():
-    """Получает все разговоры, сделанные конкретным агентом."""
     if not ELEVENLABS_AGENT_ID:
         print("Ошибка: ID агента не указан в переменных окружения.")
         return []
@@ -53,12 +50,10 @@ def get_new_conversations():
     url = f"{API_BASE_URL}/convai/conversations"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     params = {"page_size": 100}
-    
     agent_conversations = []
     
     while True:
         try:
-            print(f"Запрашиваем разговоры, курсор: {params.get('cursor', 'N/A')}")
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
@@ -70,46 +65,51 @@ def get_new_conversations():
             if not data.get("has_more"):
                 break
             params["cursor"] = data.get("next_cursor")
-
         except requests.RequestException as e:
-            print(f"Ошибка при запросе к ConvAI API: {e}")
+            print(f"Ошибка при запросе списка разговоров: {e}")
             break
             
     print(f"Найдено всего {len(agent_conversations)} разговоров для агента {ELEVENLABS_AGENT_ID}.")
     return agent_conversations
 
+# --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
 def get_conversation_details(conversation_id):
-    """Получает полную транскрибацию и метаданные разговора."""
+    """Получает полную транскрибацию с улучшенной обработкой ошибок."""
     url = f"{API_BASE_URL}/convai/conversations/{conversation_id}"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        # Проверяем на ошибки, прежде чем пытаться парсить JSON
+        if response.status_code != 200:
+            print(f"Ошибка получения деталей для {conversation_id}. Статус: {response.status_code}. Ответ: {response.text}")
+            return None
         return response.json()
-    except requests.RequestException as e:
-        print(f"Ошибка получения деталей для {conversation_id}: {e}")
+    except Exception as e: # Ловим любую возможную ошибку
+        print(f"Критическая ошибка при запросе деталей для {conversation_id}: {e}")
         return None
 
+# --- И ИЗМЕНЕНИЯ ЗДЕСЬ ---
 def download_conversation_audio(conversation_id):
-    """Скачивает аудиофайл разговора."""
+    """Скачивает аудиофайл с улучшенной обработкой ошибок."""
     url = f"{API_BASE_URL}/convai/conversations/{conversation_id}/audio"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     try:
         response = requests.get(url, headers=headers, stream=True)
-        response.raise_for_status()
-        
+        if response.status_code != 200:
+            print(f"Ошибка скачивания аудио для {conversation_id}. Статус: {response.status_code}. Ответ: {response.text}")
+            return None
+            
         filename = f"{conversation_id}.mp3"
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
         print(f"Аудиофайл {filename} успешно скачан.")
         return filename
-    except requests.RequestException as e:
-        print(f"Ошибка скачивания аудио для {conversation_id}: {e}")
+    except Exception as e: # Ловим любую возможную ошибку
+        print(f"Критическая ошибка при скачивании аудио для {conversation_id}: {e}")
         return None
 
 def upload_to_drive(drive_service, filename, folder_id):
-    """Загружает файл на Google Drive."""
     try:
         file_metadata = {'name': filename, 'parents': [folder_id]}
         media = MediaFileUpload(filename, mimetype='audio/mpeg', resumable=True)
@@ -121,7 +121,6 @@ def upload_to_drive(drive_service, filename, folder_id):
         return None
 
 def format_transcript(transcript_data):
-    """Форматирует транскрипцию в читаемый вид."""
     lines = []
     for msg in transcript_data:
         role = msg.get("role", "UNKNOWN").capitalize()
@@ -131,7 +130,6 @@ def format_transcript(transcript_data):
     return "\n".join(lines)
 
 def append_to_google_doc(docs_service, text, audio_link, start_time_str):
-    """Добавляет запись в Google Doc."""
     try:
         content = (
             f"--- Запись от {start_time_str} ---\n\n"
@@ -156,40 +154,43 @@ def main():
     
     conversations = get_new_conversations()
     if not conversations:
-        print("Новых разговоров не найдено или не удалось их получить.")
+        print("Разговоров для агента не найдено.")
         return
         
-    # Сортируем от старых к новым для последовательной обработки
     conversations.sort(key=lambda c: c.get("start_time_unix_secs", 0))
 
     new_items_found = 0
     for conv_summary in conversations:
         conv_id = conv_summary.get('conversation_id')
         if conv_id and conv_id not in processed_ids:
-            new_items_found += 1
             print(f"\n--- Обработка новой записи: {conv_id} ---")
-
+            new_items_found += 1
+            
+            # --- И ГЛАВНЫЕ ИЗМЕНЕНИЯ ЗДЕСЬ ---
             details = get_conversation_details(conv_id)
             if not details:
+                print(f"Не удалось получить детали для {conv_id}. Пропускаем.")
+                time.sleep(1) # Небольшая пауза на всякий случай
                 continue
-
-            start_ts = details.get("metadata", {}).get("start_time_unix_secs", 0)
-            start_time_str = datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d %H:%M:%S') if start_ts else "N/A"
-            
-            transcript_text = format_transcript(details.get("transcript", []))
-            if not transcript_text:
-                transcript_text = "Транскрибация пуста."
 
             audio_filename = download_conversation_audio(conv_id)
             if not audio_filename:
+                print(f"Не удалось скачать аудио для {conv_id}. Пропускаем.")
+                time.sleep(1)
                 continue
+            
+            # Если дошли сюда, значит все данные на месте
+            start_ts = details.get("metadata", {}).get("start_time_unix_secs", 0)
+            start_time_str = datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d %H:%M:%S') if start_ts else "N/A"
+            transcript_text = format_transcript(details.get("transcript", [])) or "Транскрибация пуста."
 
             audio_link = upload_to_drive(drive_service, audio_filename, GOOGLE_DRIVE_FOLDER_ID)
             
             if audio_link:
                 append_to_google_doc(docs_service, transcript_text, audio_link, start_time_str)
+                # Помечаем как обработанное ТОЛЬКО после успешной загрузки
+                save_processed_id(conv_id)
             
-            save_processed_id(conv_id)
             os.remove(audio_filename)
 
     if new_items_found == 0:
