@@ -44,7 +44,7 @@ def save_processed_id(conversation_id):
 
 def get_new_conversations():
     if not ELEVENLABS_AGENT_ID:
-        print("Ошибка: ID агента не указан в переменных окружения.")
+        print("Ошибка: ID агента не указан.")
         return []
     
     url = f"{API_BASE_URL}/convai/conversations"
@@ -115,26 +115,39 @@ def upload_to_drive(drive_service, filename, folder_id):
         print(f"Ошибка загрузки на Google Drive: {e}")
         return None
 
-# --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+# --- ИЗМЕНЕННАЯ ФУНКЦИЯ ---
 def format_transcript(transcript_data):
-    """Форматирует транскрипцию в читаемый вид."""
     lines = []
-    if not transcript_data: # Добавим проверку на случай, если транскрипция вообще пуста
+    last_role = None
+    if not transcript_data:
         return ""
         
     for msg in transcript_data:
-        role = msg.get("role", "UNKNOWN").capitalize()
-        # Эта строка теперь безопасна для 'message: null'
+        current_role = msg.get("role", "UNKNOWN")
+        
+        # Добавляем пустую строку, если спикер сменился
+        if last_role and last_role != current_role:
+            lines.append("")
+            
         text = (msg.get("message") or "").strip() 
         if text:
-            lines.append(f"{role}: {text}")
+            lines.append(f"{current_role.capitalize()}: {text}")
+        
+        last_role = current_role
+        
     return "\n".join(lines)
 
-def append_to_google_doc(docs_service, text, audio_link, start_time_str):
+# --- ИЗМЕНЕННАЯ ФУНКЦИЯ ---
+def append_to_google_doc(docs_service, summary, transcript, audio_link, start_time_str):
     try:
+        summary_block = ""
+        if summary:
+            summary_block = f"Краткое содержание (Summary):\n{summary}\n\n"
+
         content = (
             f"--- Запись от {start_time_str} ---\n\n"
-            f"Транскрибация:\n{text}\n\n"
+            f"{summary_block}"
+            f"Транскрибация:\n{transcript}\n\n"
             f"Ссылка на аудиофайл: {audio_link}\n\n"
             "-----------------------------------------\n\n"
         )
@@ -148,7 +161,7 @@ def main():
     print("Начало работы скрипта...")
     docs_service, drive_service = get_google_services()
     if not all([docs_service, drive_service]):
-        sys.exit("Не удалось подключиться к сервисам Google. Завершение работы.")
+        sys.exit("Не удалось подключиться к сервисам Google.")
 
     processed_ids = get_processed_ids()
     print(f"Загружено {len(processed_ids)} уже обработанных ID.")
@@ -179,14 +192,20 @@ def main():
                 time.sleep(1)
                 continue
             
+            # --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
             start_ts = details.get("metadata", {}).get("start_time_unix_secs", 0)
             start_time_str = datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d %H:%M:%S') if start_ts else "N/A"
+            
+            # Получаем summary
+            summary_text = (details.get("analysis") or {}).get("transcript_summary", "").strip()
+            
             transcript_text = format_transcript(details.get("transcript", [])) or "Транскрибация пуста."
 
             audio_link = upload_to_drive(drive_service, audio_filename, GOOGLE_DRIVE_FOLDER_ID)
             
             if audio_link:
-                append_to_google_doc(docs_service, transcript_text, audio_link, start_time_str)
+                # Передаем summary в функцию
+                append_to_google_doc(docs_service, summary_text, transcript_text, audio_link, start_time_str)
                 save_processed_id(conv_id)
             
             os.remove(audio_filename)
