@@ -2,7 +2,8 @@ name: Sync ElevenLabs Calls
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Запуск каждые 20 минут
+    - cron: '*/20 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -22,11 +23,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Вот это место нужно исправить
       - name: Run sync script
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-          ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }} # <-- ВОТ ЭТА СТРОКА ОТСУТСТВОВАЛА
+          ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }}
           GOOGLE_DOC_ID: ${{ secrets.GOOGLE_DOC_ID }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
@@ -37,4 +37,5 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add processed_ids.txt
+          # Фиксируем изменения только если они есть
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update processed IDs" && git push)
