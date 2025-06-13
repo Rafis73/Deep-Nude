@@ -1,6 +1,5 @@
 name: Sync ElevenLabs Calls
 
-# Запуск каждые 5 минут, а также возможность ручного запуска
 on:
   schedule:
     - cron: '*/5 * * * *'
@@ -10,36 +9,32 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # 1. Загружаем код из репозитория
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      # 2. Устанавливаем Python
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      # 3. Устанавливаем зависимости
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4. Запускаем наш основной скрипт
+      # Вот это место нужно исправить
       - name: Run sync script
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }} # <-- ВОТ ЭТА СТРОКА ОТСУТСТВОВАЛА
           GOOGLE_DOC_ID: ${{ secrets.GOOGLE_DOC_ID }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: python main.py
 
-      # 5. Сохраняем изменения в файле processed_ids.txt обратно в репозиторий
       - name: Commit and push if changed
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add processed_ids.txt
-          # Фиксируем изменения только если они есть
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update processed IDs" && git push)
