@@ -2,6 +2,7 @@ import os
 import requests
 import json
 from datetime import datetime
+import sys
 
 # Библиотеки Google
 from google.oauth2.service_account import Credentials
@@ -11,15 +12,39 @@ from googleapiclient.http import MediaFileUpload
 # --- КОНФИГУРАЦИЯ ---
 # Эти значения мы будем получать из GitHub Secrets (переменных окружения)
 ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
+ELEVENLABS_AGENT_ID = os.getenv('ELEVENLABS_AGENT_ID') # <-- НОВЫЙ ПАРАМЕТР
 GOOGLE_DOC_ID = os.getenv('GOOGLE_DOC_ID')
 GOOGLE_DRIVE_FOLDER_ID = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
-# JSON-ключ сервисного аккаунта будет передан как строка
 GOOGLE_CREDENTIALS_JSON_STR = os.getenv('GOOGLE_CREDENTIALS_JSON')
 
 # Файл для хранения ID уже обработанных записей
 PROCESSED_IDS_FILE = 'processed_ids.txt'
+API_BASE_URL = "https://api.elevenlabs.io/v1"
 
-# --- ЛОГИКА ---
+# --- НОВАЯ ФУНКЦИЯ для получения Voice ID агента ---
+def get_voice_id_for_agent(agent_id):
+    """Получает voice_id, используемый конкретным агентом."""
+    if not agent_id:
+        print("Ошибка: ID агента не указан в переменных окружения (ELEVENLABS_AGENT_ID).")
+        return None
+        
+    url = f"{API_BASE_URL}/agents/{agent_id}"
+    headers = {"xi-api-key": ELEVENLABS_API_KEY}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        agent_details = response.json()
+        voice_id = agent_details.get('voice_id')
+        if voice_id:
+            print(f"Агент {agent_id} использует voice_id: {voice_id}")
+            return voice_id
+        else:
+            print(f"Ошибка: Не удалось найти voice_id для агента {agent_id}")
+            return None
+    except requests.RequestException as e:
+        print(f"Ошибка при получении данных агента {agent_id}: {e}")
+        return None
 
 def get_google_services():
     """Аутентификация в Google и получение сервисов Docs и Drive."""
@@ -53,10 +78,9 @@ def save_processed_id(history_id):
 
 def get_elevenlabs_history():
     """Получает историю генераций из ElevenLabs."""
-    url = "https://api.elevenlabs.io/v1/history"
+    url = f"{API_BASE_URL}/history"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
-    # Запрашиваем побольше записей, чтобы не пропустить ничего за 5 минут
-    params = {"page_size": 100} 
+    params = {"page_size": 100}
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
@@ -67,7 +91,7 @@ def get_elevenlabs_history():
 
 def download_audio(history_id):
     """Скачивает аудиофайл по его ID."""
-    url = f"https://api.elevenlabs.io/v1/history/{history_id}/audio"
+    url = f"{API_BASE_URL}/history/{history_id}/audio"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     try:
         response = requests.get(url, headers=headers, stream=True)
@@ -105,24 +129,14 @@ def upload_to_drive(drive_service, filename, folder_id):
 def append_to_google_doc(docs_service, text, audio_link):
     """Добавляет текст и ссылку в Google Doc."""
     try:
-        # Форматируем запись
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         content = (
             f"--- Запись от {timestamp} ---\n"
             f"Транскрибация:\n{text}\n"
             f"Ссылка на аудиофайл: {audio_link}\n\n"
         )
-        
-        # Вставляем текст в начало документа
         requests_body = [
-            {
-                'insertText': {
-                    'location': {
-                        'index': 1,
-                    },
-                    'text': content
-                }
-            }
+            {'insertText': {'location': {'index': 1}, 'text': content}}
         ]
         docs_service.documents().batchUpdate(
             documentId=GOOGLE_DOC_ID, body={'requests': requests_body}
@@ -133,10 +147,18 @@ def append_to_google_doc(docs_service, text, audio_link):
 
 def main():
     print("Начало работы скрипта...")
+    
+    # 1. Получаем Voice ID целевого агента
+    target_voice_id = get_voice_id_for_agent(ELEVENLABS_AGENT_ID)
+    if not target_voice_id:
+        print("Не удалось получить Voice ID для указанного агента. Завершение работы.")
+        sys.exit(1) # Завершаем скрипт с ошибкой
+
+    # 2. Подключаемся к Google
     docs_service, drive_service = get_google_services()
     if not all([docs_service, drive_service]):
         print("Не удалось подключиться к сервисам Google. Завершение работы.")
-        return
+        sys.exit(1)
 
     processed_ids = get_processed_ids()
     print(f"Загружено {len(processed_ids)} уже обработанных ID.")
@@ -146,38 +168,33 @@ def main():
         print("История пуста или не удалось ее получить. Завершение работы.")
         return
 
-    # API возвращает историю от новых к старым, поэтому обрабатываем в обратном порядке
     new_items_found = 0
     for item in reversed(history):
         history_id = item.get('history_item_id')
+        
+        # <-- ГЛАВНОЕ ИЗМЕНЕНИЕ: ФИЛЬТРАЦИЯ ПО VOICE ID -->
+        if item.get('voice_id') != target_voice_id:
+            continue # Пропускаем запись, если она сделана другим голосом
+
         if history_id and history_id not in processed_ids:
             new_items_found += 1
-            print(f"\nНайдена новая запись: {history_id}")
+            print(f"\nНайдена новая запись от целевого агента: {history_id}")
             
-            # 1. Получаем текст
             text = item.get('text', 'Текст не найден.')
-            
-            # 2. Скачиваем аудио
             audio_filename = download_audio(history_id)
             if not audio_filename:
                 continue
 
-            # 3. Загружаем аудио на Google Drive
             audio_link = upload_to_drive(drive_service, audio_filename, GOOGLE_DRIVE_FOLDER_ID)
-            
-            # 4. Добавляем запись в Google Doc
             if audio_link:
                 append_to_google_doc(docs_service, text, audio_link)
             
-            # 5. Отмечаем как обработанное
             save_processed_id(history_id)
-
-            # 6. Удаляем временный аудиофайл
             os.remove(audio_filename)
             print(f"Временный файл {audio_filename} удален.")
 
     if new_items_found == 0:
-        print("Новых записей не найдено.")
+        print("Новых записей от целевого агента не найдено.")
     
     print("Работа скрипта завершена.")
 
