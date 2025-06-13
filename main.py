@@ -72,25 +72,20 @@ def get_new_conversations():
     print(f"Найдено всего {len(agent_conversations)} разговоров для агента {ELEVENLABS_AGENT_ID}.")
     return agent_conversations
 
-# --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
 def get_conversation_details(conversation_id):
-    """Получает полную транскрибацию с улучшенной обработкой ошибок."""
     url = f"{API_BASE_URL}/convai/conversations/{conversation_id}"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     try:
         response = requests.get(url, headers=headers)
-        # Проверяем на ошибки, прежде чем пытаться парсить JSON
         if response.status_code != 200:
             print(f"Ошибка получения деталей для {conversation_id}. Статус: {response.status_code}. Ответ: {response.text}")
             return None
         return response.json()
-    except Exception as e: # Ловим любую возможную ошибку
+    except Exception as e:
         print(f"Критическая ошибка при запросе деталей для {conversation_id}: {e}")
         return None
 
-# --- И ИЗМЕНЕНИЯ ЗДЕСЬ ---
 def download_conversation_audio(conversation_id):
-    """Скачивает аудиофайл с улучшенной обработкой ошибок."""
     url = f"{API_BASE_URL}/convai/conversations/{conversation_id}/audio"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     try:
@@ -105,7 +100,7 @@ def download_conversation_audio(conversation_id):
                 f.write(chunk)
         print(f"Аудиофайл {filename} успешно скачан.")
         return filename
-    except Exception as e: # Ловим любую возможную ошибку
+    except Exception as e:
         print(f"Критическая ошибка при скачивании аудио для {conversation_id}: {e}")
         return None
 
@@ -120,11 +115,17 @@ def upload_to_drive(drive_service, filename, folder_id):
         print(f"Ошибка загрузки на Google Drive: {e}")
         return None
 
+# --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
 def format_transcript(transcript_data):
+    """Форматирует транскрипцию в читаемый вид."""
     lines = []
+    if not transcript_data: # Добавим проверку на случай, если транскрипция вообще пуста
+        return ""
+        
     for msg in transcript_data:
         role = msg.get("role", "UNKNOWN").capitalize()
-        text = msg.get("message", "").strip()
+        # Эта строка теперь безопасна для 'message: null'
+        text = (msg.get("message") or "").strip() 
         if text:
             lines.append(f"{role}: {text}")
     return "\n".join(lines)
@@ -166,11 +167,10 @@ def main():
             print(f"\n--- Обработка новой записи: {conv_id} ---")
             new_items_found += 1
             
-            # --- И ГЛАВНЫЕ ИЗМЕНЕНИЯ ЗДЕСЬ ---
             details = get_conversation_details(conv_id)
             if not details:
                 print(f"Не удалось получить детали для {conv_id}. Пропускаем.")
-                time.sleep(1) # Небольшая пауза на всякий случай
+                time.sleep(1)
                 continue
 
             audio_filename = download_conversation_audio(conv_id)
@@ -179,7 +179,6 @@ def main():
                 time.sleep(1)
                 continue
             
-            # Если дошли сюда, значит все данные на месте
             start_ts = details.get("metadata", {}).get("start_time_unix_secs", 0)
             start_time_str = datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d %H:%M:%S') if start_ts else "N/A"
             transcript_text = format_transcript(details.get("transcript", [])) or "Транскрибация пуста."
@@ -188,7 +187,6 @@ def main():
             
             if audio_link:
                 append_to_google_doc(docs_service, transcript_text, audio_link, start_time_str)
-                # Помечаем как обработанное ТОЛЬКО после успешной загрузки
                 save_processed_id(conv_id)
             
             os.remove(audio_filename)
